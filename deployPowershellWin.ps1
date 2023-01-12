@@ -5,6 +5,7 @@ $eventData = (ConvertFrom-Json -InputObject $WebhookData.RequestBody)
 if ($eventData.subject -match 'microsoft.compute/virtualmachines') {
     $vmName = $eventData.subject.Split('/')[8]
     $vmResourceGroupName = $eventData.subject.Split('/')[4]
+    $vmSubscription = $eventData.subject.Split('/')[2]
 
     Connect-AzAccount -Identity
 
@@ -13,21 +14,23 @@ if ($eventData.subject -match 'microsoft.compute/virtualmachines') {
 
     $ctx = (Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $storageAccountName).Context
 
-    $sasUri = New-AzStorageBlobSASToken -Blob 'PowerShell-7.1.3-win-x64.msi' -Container software -Permission r -ExpiryTime (Get-Date).AddMinutes(30) -Context $ctx -FullUri
+    $sasUri = New-AzStorageBlobSASToken -Blob 'PowerShell-7.1.3-win-x64.msi' -Container installers -Permission r -ExpiryTime (Get-Date).AddMinutes(30) -Context $ctx -FullUri
 
 
     $scriptBlock = @'
-$sasUri = "VALUE"
 
-Invoke-WebRequest -Uri $sasUri -OutFile "$env:TEMP\PowerShell-7.1.3-win-x64.msi" -Verbose
+    $sasUri = "VALUE"
 
-Start-Process "$env:Temp\PowerShell-7.1.3-win-x64.msi" -ArgumentList "/quiet /norestart" -Verbose
+    Invoke-WebRequest -Uri $sasUri -OutFile "$env:TEMP\PowerShell-7.1.3-win-x64.msi" -Verbose
+    
+    Start-Process "$env:Temp\PowerShell-7.1.3-win-x64.msi" -ArgumentList "/quiet /norestart" -Verbose
 '@
 
     $scriptBlock | Out-File $env:Temp\script.ps1
 
-    (Get-Content $env:Temp\script.ps1 -Raw) -replace "VALUE", $sasUri | Set-Content $env:Temp\script.ps1 -Force
-
+    (Get-Content $env:Temp\script.ps1 -Raw) -replace "SASURIVALUE", $sasUri | Set-Content $env:Temp\script.ps1 -Force
+    
+    Set-AzContext -SubscriptionId $vmSubscription
     Invoke-AzVMRunCommand -ResourceGroupName $vmResourceGroupName -VMName $vmName -ScriptPath $env:Temp\script.ps1 -CommandId 'RunPowerShellScript' -Verbose
 }
 else {

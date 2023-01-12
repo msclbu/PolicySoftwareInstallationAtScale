@@ -1,24 +1,27 @@
 param storageAccountName string
 param automationAccountName string
-param resourceGroupName string
 param location string
+param subscriptionId string
+param storageAccountResourceGroupName string
+param resourceGroupName string
+param mgId string
 
 var modules = [
   {
     name: 'Az.Accounts'
-    url: 'https://devopsgallerystorage.blob.core.windows.net/packages/az.accounts.2.2.8.nupkg'
+    url: 'https://devopsgallerystorage.blob.core.windows.net/packages/az.accounts.2.10.3.nupkg'
   }
   {
     name: 'Az.Resources'
-    url: 'https://devopsgallerystorage.blob.core.windows.net/packages/az.resources.3.4.0.nupkg'
+    url: 'https://devopsgallerystorage.blob.core.windows.net/packages/az.resources.6.4.1.nupkg'
   }
   {
     name: 'Az.Storage'
-    url: 'https://devopsgallerystorage.blob.core.windows.net/packages/az.storage.3.6.0.nupkg'
+    url: 'https://devopsgallerystorage.blob.core.windows.net/packages/az.storage.5.1.0.nupkg'
   }
   {
     name: 'Az.Compute'
-    url: 'https://devopsgallerystorage.blob.core.windows.net/packages/az.compute.4.12.0.nupkg'
+    url: 'https://devopsgallerystorage.blob.core.windows.net/packages/az.compute.5.1.1.nupkg'
   }
 ]
 
@@ -29,27 +32,10 @@ var automationVariables = [
   }
   {
     name: 'ResourceGroupName'
-    value: resourceGroupName
+    value: storageAccountResourceGroupName
   }
 ]
 
-var policyDefinitionId = '/providers/Microsoft.Authorization/policySetDefinitions/12794019-7a00-42cf-95c2-882eed337cc8'
-
-resource st1 'Microsoft.Storage/storageAccounts@2021-01-01' = {
-  name: storageAccountName
-  location: location
-  sku: {
-    name: 'Standard_LRS'
-  }
-  kind: 'StorageV2'
-}
-
-resource ct1 'Microsoft.Storage/storageAccounts/blobServices/containers@2021-01-01' = {
-  name: '${storageAccountName}/default/software'
-  dependsOn: [
-    st1
-  ]
-}
 
 resource aa 'Microsoft.Automation/automationAccounts@2020-01-13-preview' = {
   name: automationAccountName
@@ -79,7 +65,7 @@ resource perm1 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
   name: guid(automationAccountName)
   properties: {
     principalId: aa.identity.principalId
-    roleDefinitionId: resourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')
+    roleDefinitionId: resourceId('Microsoft.Authorization/roleDefinitions', '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')
     principalType: 'ServicePrincipal'
   }
   dependsOn: [
@@ -101,23 +87,25 @@ resource mods 'Microsoft.Automation/automationAccounts/modules@2015-10-31' = [fo
   ]
 }]
 
-resource gcpol 'Microsoft.Authorization/policyAssignments@2020-09-01' = {
-  name: guid(storageAccountName)
-  location: location
-  properties: {
-    policyDefinitionId: policyDefinitionId
-    displayName: 'Deploy Guest Configuration'
-  }
-  identity: {
-    type: 'SystemAssigned'
-  }
-}
 
 resource systopic 'Microsoft.EventGrid/systemTopics@2020-10-15-preview' = {
   name: 'PolicyStateChanges'
   location: 'global'
   properties: {
     topicType: 'Microsoft.PolicyInsights.PolicyStates'
-    source: subscription().id
+    source: mgId
   }
+}
+
+
+module nestedStorageTemplate './AutomationAccountStorage_Nested.bicep' = {
+  name: 'nestedStorageTemplate'
+  scope: resourceGroup(subscriptionId, 'Shared-RG')
+  params: {
+    aaNameNested: reference(resourceId('Microsoft.Automation/automationAccounts', automationAccountName), '2022-08-08', 'Full')
+    storageName: storageAccountName
+  }
+  dependsOn: [
+    aa
+  ]
 }

@@ -1,35 +1,67 @@
+param(
+    [string]$mgID,
+    [string]$resourceGroupName,
+    [string]$storageAccountName,
+    [string]$location,
+    [string]$automationAccountName,
+    [string]$storageAccountResourceGroupName,
+    [string]$subscriptionID,
+    [string]$mgName
+)
+
 $params = @{
-    resourceGroupName     = "SoftwareInstallation" # <-- Change this value for the Resource Group Name
-    storageAccountName    = "strsi01a" # <-- Change this value - must be globally unique
-    location              = "australiasoutheast" # <-- Change this value to a location you want
-    automationAccountName = "siaa01" # <-- Change this value for the Automation Account Name
+    resourceGroupName     = $resourceGroupName #"" # <-- Change this value for the Resource Group Name
+    storageAccountName    = $storageAccountName#"" # <-- Change this value - must be globally unique
+    location              = $location #"" # <-- Change this value to a location you want
+    automationAccountName = $automationAccountName #"" # <-- Change this value for the Automation Account Name
+    storageAccountResourceGroupName = $storageAccountResourceGroupName #''
+    subscriptionID = $subscriptionID
 }
+#Create Resource Group
+New-AzResourceGroup -Name $params.resourceGroupName -Location 'australiaeast' -Force
 
-New-AzResourceGroup -Name $params.resourceGroupName -Location 'australiasoutheast' -Force
-
+#Deploy main Bcicep template
 Write-Host "Deploying Infrastructure" -ForegroundColor Green
-New-AzResourceGroupDeployment -ResourceGroupName $params.resourceGroupName -TemplateFile .\deploy.bicep -TemplateParameterObject $params -Verbose
+New-AzResourceGroupDeployment -ResourceGroupName $params.resourceGroupName -TemplateFile .\deploy.bicep -TemplateParameterObject $params -Verbose `
+-mgId $mgID
 
-$ctx = (Get-AzStorageAccount -ResourceGroupName $params.resourceGroupName -StorageAccountName $params.storageAccountName).Context
-
+#Get automation account
 $automationAccount = Get-AzAutomationAccount -ResourceGroupName $params.resourceGroupName -Name $params.automationAccountName
 
-Write-Host "Downloading PowerShell 7-x64" -ForegroundColor Green
-Invoke-WebRequest -Uri "https://github.com/PowerShell/PowerShell/releases/download/v7.1.3/PowerShell-7.1.3-win-x64.msi" -OutFile "$env:TEMP\PowerShell-7.1.3-win-x64.msi"
+#Create Azure Policy definitions from JSON Templates
+$linuxPolicyDef = New-AzPolicyDefinition -Name 'Install Linux Apps via tags Policy Definition' -Policy ./policyDefinitionLinuxTags.json -ManagementGroupName $mgName
+$windowsPolicyDef = New-AzPolicyDefinition -Name 'Install Windows Apps via tags Policy Definition' -Policy ./policyDefinitionWindowsTags.json -ManagementGroupName $mgName
 
-Write-Host "Uploading file to storage account" -ForegroundColor Green
-Set-AzStorageBlobContent -File "$env:TEMP\PowerShell-7.1.3-win-x64.msi" -Blob "PowerShell-7.1.3-win-x64.msi" -Container software -Context $ctx -Force
+#Publish Runbooks
+Write-Host "Publishing Windows runbook to automation account" -ForegroundColor Green
+$automationAccount | Import-AzAutomationRunbook -Name deployPowerShellWin -Path .\deployPowershellWin.ps1 -Type PowerShell -Force -Published
 
-Write-Host "Publishing runbook to automation account" -ForegroundColor Green
-$automationAccount | Import-AzAutomationRunbook -Name deployPowerShell -Path .\deployPowerShell.ps1 -Type PowerShell -Force -Published
+Write-Host "Publishing Linux runbook to automation account" -ForegroundColor Green
+$automationAccount | Import-AzAutomationRunbook -Name deployGitLinux -Path .\deployGitLinux.ps1 -Type PowerShell -Force -Published
 
-Write-Host "Generating webhook" -ForegroundColor Green
-$wh = $automationAccount | New-AzAutomationWebhook -Name WH1 -ExpiryTime (Get-Date).AddYears(1) -RunbookName deployPowerShell -IsEnabled $true -Force
+#Generate webhooks for published runbooks
+Write-Host "Generating Windows webhook" -ForegroundColor Green
+$whWin = $automationAccount | New-AzAutomationWebhook -Name WHWin -ExpiryTime (Get-Date).AddYears(1) -RunbookName deployCrowdstrikeWin -IsEnabled $true -Force
 
-Write-Host "Deploying event grid subscription and software installation policy" -ForegroundColor Green
+Write-Host "Generating Linux webhook" -ForegroundColor Green
+$whLinux = $automationAccount | New-AzAutomationWebhook -Name WHLinux -ExpiryTime (Get-Date).AddYears(1) -RunbookName deployCrowdstrikeLinux -IsEnabled $true -Force
+
+Write-Host "Deploying software installation policy" -ForegroundColor Green
+$policyOutput = New-AzManagementGroupDeployment -ManagementGroupId $mgName -TemplateFile ".\deployPolicy.bicep" -location $params.location `
+-locationFromTemplate $params.location `
+-policyDefinitionIdWindows ($windowsPolicyDef.ResourceId) `
+-policyDefinitionIdLinux ($linuxPolicyDef.ResourceId) 
+
+$policyAssignmentIdWin = $policyOutput.Outputs["assignmentIdWin"].Value
+$policyAssignmentIdLinux = $policyOutput.Outputs["assignmentIdLinux"].Value
+
+#Deploy event grid
+Write-Host "Deploying event grid subscription and topics" -ForegroundColor Green
 New-AzResourceGroupDeployment -ResourceGroupName $params.resourceGroupName `
-    -TemplateFile .\eventgrid.bicep `
-    -uri ($wh.WebhookURI | ConvertTo-SecureString -AsPlainText -Force) `
-    -location $params.location `
+    -TemplateFile .\eventGridDeploy.bicep `
+    -uriWin ($whWin.WebhookURI | ConvertTo-SecureString -AsPlainText -Force) `
+    -uriLinux ($whLinux.WebhookURI | ConvertTo-SecureString -AsPlainText -Force) `
     -topicName "PolicyStateChanges" `
+    -policyAssignmentIdWin $($policyAssignmentIdWin) `
+    -policyAssignmentIdLinux $($policyAssignmentIdLinux) `
     -Verbose
